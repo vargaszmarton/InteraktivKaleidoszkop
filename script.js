@@ -2,155 +2,155 @@
   const canvas = document.getElementById('kaleidoscope');
   const video = document.getElementById('camera');
   const ctx = canvas.getContext('2d', { alpha: false });
-  const source = document.createElement('canvas');
-  const src = source.getContext('2d');
-  source.width = source.height = 900;
+  const texture = document.createElement('canvas');
+  const ink = texture.getContext('2d');
+  texture.width = texture.height = 512;
+  const colors = ['#f05492', '#e8ad59', '#5ad6ce', '#7f89ec', '#b777de'];
+  let seed = 48391;
+  const random = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const state = { x: 0, y: 0, zoom: 1 };
+  let width, height, resolution, side, triangleHeight;
+  let pointerUntil = 0, lastFrame = -1, lastDetection = 0;
+  let landmarker, stream, cameraReady = false;
 
-  const TAU = Math.PI * 2;
-  const segments = 16;
-  const sector = TAU / segments;
-  const hues = [332, 284, 205, 178, 43, 16];
-  const motes = Array.from({ length: 34 }, (_, i) => ({
-    phase: i * 2.39996,
-    orbit: 72 + ((i * 137) % 310),
-    size: 20 + ((i * 53) % 70),
-    speed: .13 + ((i * 17) % 13) / 100,
-    hue: hues[i % hues.length],
-  }));
+  function paintTexture() {
+    const background = ink.createLinearGradient(0, 0, 512, 512);
+    background.addColorStop(0, '#17152e');
+    background.addColorStop(.5, '#111d32');
+    background.addColorStop(1, '#271334');
+    ink.fillStyle = background;
+    ink.fillRect(0, 0, 512, 512);
+    for (let i = 0; i < 38; i++) {
+      const x = random() * 512, y = random() * 512;
+      const radius = 18 + random() * 58;
+      const color = colors[i % colors.length];
+      const glow = ink.createRadialGradient(x, y, 0, x, y, radius * 2);
+      glow.addColorStop(0, `${color}bb`);
+      glow.addColorStop(.3, `${color}55`);
+      glow.addColorStop(1, `${color}00`);
+      ink.fillStyle = glow;
+      ink.beginPath();
+      ink.arc(x, y, radius * 2, 0, Math.PI * 2);
+      ink.fill();
+      ink.save();
+      ink.translate(x, y);
+      ink.rotate(random() * Math.PI * 2);
+      ink.strokeStyle = `${color}cc`;
+      ink.lineWidth = 1.5 + random() * 2;
+      ink.beginPath();
+      ink.ellipse(0, 0, radius * (.55 + random() * .55), radius * (.16 + random() * .18), 0, 0, Math.PI * 2);
+      ink.stroke();
+      ink.restore();
+    }
+    for (let i = 0; i < 85; i++) {
+      ink.fillStyle = `${colors[i % colors.length]}88`;
+      ink.beginPath();
+      ink.arc(random() * 512, random() * 512, i % 7 === 0 ? 2.2 : .9, 0, Math.PI * 2);
+      ink.fill();
+    }
+  }
 
-  let width = 0;
-  let height = 0;
-  let scale = 1;
-  let pointerUntil = 0;
-  let lastFrame = -1;
-  let landmarker;
-  let stream;
-  let cameraReady = false;
-  const target = { x: 0, y: 0, twist: 0, zoom: 1 };
-  const motion = { x: 0, y: 0, twist: 0, zoom: 1 };
+  function vertex(row, column) {
+    return {
+      x: (column + (row & 1) * .5) * side - side * .23,
+      y: row * triangleHeight - triangleHeight * .3,
+      slot: ((column + (row & 1) * 2) % 3 + 3) % 3,
+    };
+  }
+
+  function triangle(p, q, r, crop) {
+    const corners = [];
+    for (const point of [p, q, r]) corners[point.slot] = point;
+    const [a, b, c] = corners;
+    const centerX = (p.x + q.x + r.x) / 3;
+    const centerY = (p.y + q.y + r.y) / 3;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(centerX + (p.x - centerX) * 1.006, centerY + (p.y - centerY) * 1.006);
+    ctx.lineTo(centerX + (q.x - centerX) * 1.006, centerY + (q.y - centerY) * 1.006);
+    ctx.lineTo(centerX + (r.x - centerX) * 1.006, centerY + (r.y - centerY) * 1.006);
+    ctx.closePath();
+    ctx.clip();
+    const ma = (b.x - a.x) / side, mb = (b.y - a.y) / side;
+    const mc = (c.x - a.x - ma * side / 2) / triangleHeight;
+    const md = (c.y - a.y - mb * side / 2) / triangleHeight;
+    ctx.transform(ma, mb, mc, md, a.x, a.y);
+    ctx.drawImage(texture, crop.x - 2, crop.y - 2, crop.w + 4, crop.h + 4, -2, -2, side + 4, triangleHeight + 4);
+    ctx.restore();
+  }
+
+  function render() {
+    ctx.setTransform(resolution, 0, 0, resolution, 0, 0);
+    ctx.fillStyle = '#11182c';
+    ctx.fillRect(0, 0, width, height);
+    const w = 250 / state.zoom, h = w * Math.sqrt(3) / 2;
+    const crop = {
+      x: Math.max(0, Math.min(512 - w, (512 - w) / 2 + state.x * 105)),
+      y: Math.max(0, Math.min(512 - h, (512 - h) / 2 + state.y * 105)),
+      w, h,
+    };
+    const rows = Math.ceil(height / triangleHeight) + 3;
+    const columns = Math.ceil(width / side) + 3;
+    for (let row = -1; row < rows; row++) {
+      for (let column = -1; column < columns; column++) {
+        const a = vertex(row, column), b = vertex(row, column + 1);
+        const c = vertex(row + 1, column), d = vertex(row + 1, column + 1);
+        if (row & 1) {
+          triangle(a, b, d, crop);
+          triangle(a, c, d, crop);
+        } else {
+          triangle(a, b, c, crop);
+          triangle(b, c, d, crop);
+        }
+      }
+    }
+  }
 
   function resize() {
-    scale = Math.min(window.devicePixelRatio || 1, 2);
     width = window.innerWidth;
     height = window.innerHeight;
-    canvas.width = Math.round(width * scale);
-    canvas.height = Math.round(height * scale);
-    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    resolution = Math.min(1, Math.sqrt(1100000 / (width * height)));
+    canvas.width = Math.max(1, Math.round(width * resolution));
+    canvas.height = Math.max(1, Math.round(height * resolution));
+    side = Math.max(160, Math.min(240, width * .22));
+    triangleHeight = side * Math.sqrt(3) / 2;
+    render();
   }
 
-  function movePointer(clientX, clientY) {
-    pointerUntil = performance.now() + 2200;
-    target.x = (clientX / width - .5) * 2;
-    target.y = (clientY / height - .5) * 2;
-    target.twist = target.x * .45;
-    target.zoom = 1 + Math.abs(target.y) * .18;
+  function movePointer(x, y) {
+    pointerUntil = performance.now() + 3000;
+    state.x = (x / width - .5) * 2;
+    state.y = (y / height - .5) * 2;
+    render();
   }
-
   canvas.addEventListener('pointermove', event => movePointer(event.clientX, event.clientY));
   canvas.addEventListener('pointerdown', event => movePointer(event.clientX, event.clientY));
   window.addEventListener('resize', resize);
   window.addEventListener('pagehide', () => stream?.getTracks().forEach(track => track.stop()));
-  resize();
 
-  function drawSource(time) {
-    const s = source.width;
-    const wash = src.createRadialGradient(s * .46, s * .43, 20, s * .5, s * .5, s * .72);
-    wash.addColorStop(0, '#26133d');
-    wash.addColorStop(.48, '#101537');
-    wash.addColorStop(1, '#08091d');
-    src.fillStyle = wash;
-    src.fillRect(0, 0, s, s);
-    src.save();
-    src.translate(s / 2, s / 2);
-    src.globalCompositeOperation = 'screen';
-
-    for (const mote of motes) {
-      const a = mote.phase + time * mote.speed;
-      const x = Math.cos(a) * mote.orbit + Math.sin(time * .23 + mote.phase) * 42;
-      const y = Math.sin(a * 1.37) * mote.orbit + Math.cos(time * .17 + mote.phase) * 42;
-      const radius = mote.size * (1 + Math.sin(time * .9 + mote.phase) * .18);
-      const glow = src.createRadialGradient(x, y, 1, x, y, radius * 2.5);
-      glow.addColorStop(0, `hsla(${mote.hue}, 100%, 70%, .7)`);
-      glow.addColorStop(.24, `hsla(${mote.hue}, 96%, 50%, .23)`);
-      glow.addColorStop(1, `hsla(${mote.hue}, 100%, 45%, 0)`);
-      src.fillStyle = glow;
-      src.beginPath();
-      src.arc(x, y, radius * 2.5, 0, TAU);
-      src.fill();
-      src.save();
-      src.translate(x, y);
-      src.rotate(a * 2);
-      src.strokeStyle = `hsla(${mote.hue}, 100%, 72%, .78)`;
-      src.lineWidth = 1.4;
-      src.beginPath();
-      src.ellipse(0, 0, radius * 1.35, radius * .35, 0, 0, TAU);
-      src.stroke();
-      src.restore();
-    }
-
-    for (let i = 0; i < 42; i++) {
-      const a = i * 2.39996 + time * .05;
-      const r = 30 + (i * 97) % 410;
-      src.fillStyle = `hsla(${hues[i % hues.length]}, 100%, 85%, ${.26 + (i % 4) * .13})`;
-      src.beginPath();
-      src.arc(Math.cos(a) * r, Math.sin(a) * r, i % 7 === 0 ? 2.5 : 1.2, 0, TAU);
-      src.fill();
-    }
-    src.restore();
-  }
-
-  function draw(now) {
-    const time = now * .001;
-    detectHand(now);
-    for (const key of ['x', 'y', 'twist', 'zoom']) motion[key] += (target[key] - motion[key]) * .065;
-    drawSource(time);
-
-    const radius = Math.hypot(width, height) * .64 + 8;
-    const side = source.width * Math.max(1, radius / 420) * motion.zoom;
-    ctx.fillStyle = '#09051a';
-    ctx.fillRect(0, 0, width, height);
-    ctx.save();
-    ctx.translate(width / 2, height / 2);
-    ctx.rotate(motion.twist + time * .018);
-    for (let i = 0; i < segments; i++) {
-      ctx.save();
-      ctx.rotate(i * sector);
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.arc(0, 0, radius, -sector / 2 - .002, sector / 2 + .002);
-      ctx.closePath();
-      ctx.clip();
-      if (i % 2) ctx.scale(1, -1);
-      const driftX = motion.x * 170 + Math.sin(time * .16) * 44;
-      const driftY = motion.y * 170 + Math.cos(time * .13) * 44;
-      ctx.drawImage(source, -side / 2 + driftX, -side / 2 + driftY, side, side);
-      ctx.restore();
-    }
-    ctx.restore();
-
-    const vignette = ctx.createRadialGradient(width / 2, height / 2, radius * .1, width / 2, height / 2, radius * 1.1);
-    vignette.addColorStop(0, 'rgba(4, 3, 16, 0)');
-    vignette.addColorStop(.72, 'rgba(4, 3, 16, .09)');
-    vignette.addColorStop(1, 'rgba(4, 3, 16, .7)');
-    ctx.fillStyle = vignette;
-    ctx.fillRect(0, 0, width, height);
-    requestAnimationFrame(draw);
-  }
-
-  function detectHand(now) {
-    if (!cameraReady || !landmarker || video.readyState < 2 || video.currentTime === lastFrame) return;
+  function trackHands(now) {
+    if (!cameraReady) return;
+    requestAnimationFrame(trackHands);
+    if (now - lastDetection < 90 || video.readyState < 2 || video.currentTime === lastFrame) return;
+    lastDetection = now;
     lastFrame = video.currentTime;
     try {
       const hands = landmarker.detectForVideo(video, now).landmarks;
       if (!hands.length || now < pointerUntil) return;
-      const hand = hands[0];
-      const tip = hand[8];
-      const thumb = hand[4];
-      const wrist = hand[0];
-      target.x = (0.5 - tip.x) * 2; // Mirror the front camera naturally.
-      target.y = (tip.y - .5) * 2;
-      target.twist = Math.atan2(tip.y - wrist.y, tip.x - wrist.x) * .28;
-      target.zoom = 1 + Math.min(Math.hypot(tip.x - thumb.x, tip.y - thumb.y), .45) * .65;
+      const tip = hands[0][8], thumb = hands[0][4];
+      const next = {
+        x: (0.5 - tip.x) * 2,
+        y: (tip.y - .5) * 2,
+        zoom: 1 + Math.min(Math.hypot(tip.x - thumb.x, tip.y - thumb.y), .45) * .45,
+      };
+      let changed = false;
+      for (const key of Object.keys(next)) {
+        if (Math.abs(next[key] - state[key]) > (key === 'zoom' ? .025 : .035)) {
+          state[key] += (next[key] - state[key]) * .55;
+          changed = true;
+        }
+      }
+      if (changed) render();
     } catch (_) {
       cameraReady = false;
     }
@@ -165,7 +165,6 @@
       });
       video.srcObject = stream;
       await video.play();
-
       const { FilesetResolver, HandLandmarker } = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/+esm');
       const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm');
       const options = {
@@ -173,9 +172,7 @@
           modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
           delegate: 'GPU',
         },
-        runningMode: 'VIDEO',
-        numHands: 1,
-        minTrackingConfidence: .5,
+        runningMode: 'VIDEO', numHands: 1, minTrackingConfidence: .5,
       };
       try {
         landmarker = await HandLandmarker.createFromOptions(vision, options);
@@ -184,12 +181,13 @@
         landmarker = await HandLandmarker.createFromOptions(vision, options);
       }
       cameraReady = true;
+      requestAnimationFrame(trackHands);
     } catch (_) {
-      // Mouse and touch remain available if permission, camera, or model loading fails.
       stream?.getTracks().forEach(track => track.stop());
     }
   }
 
-  requestAnimationFrame(draw);
+  paintTexture();
+  resize();
   startCamera();
 })();
